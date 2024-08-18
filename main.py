@@ -1,13 +1,70 @@
 import os
 from dotenv import load_dotenv
-from langchain_community.document_loaders import TextLoader
-from langchain.text_splitter import CharacterTextSplitter
-from langchain_openai import OpenAIEmbeddings
+from langchain_core.prompts import PromptTemplate
+from langchain_openai import OpenAIEmbeddings, ChatOpenAI
 from langchain_pinecone import PineconeVectorStore
+from langchain import hub
+
+# To go to the prompt, get the chunks back and transform them in text
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.chains.retrieval import create_retrieval_chain
+from langchain_core.runnables import RunnablePassthrough
+
 load_dotenv()
 
+
+def format_docs(docs):
+    return "\n\n".join(doc.page_content for doc in docs)
+
+
 if __name__ == '__main__':
-    print("Ingesting...")
-    loader = TextLoader("/Users/rogerartemiodiazfuentes/Desktop/Diseno_e_innovacion_con_AI/intro-to-vector-dbs/mediumblog1.txt")
-    document = loader.load()
-    print("Splitting...")
+    print("Retrieving...")
+
+    embeddings = OpenAIEmbeddings()
+    llm = ChatOpenAI()
+
+    query = "what is Pinecone in machine learning?"
+    chain = PromptTemplate.from_template(template=query) | llm
+    result = chain.invoke(input={})
+    print(result.content)
+
+    # pinecone object
+    vectorstore = PineconeVectorStore(
+        index_name=os.environ["INDEX_NAME"], embedding=embeddings
+    )
+
+    # prompt model de la comunidad para q&a
+    retrieval_qa_chat_prompt = hub.pull("langchain-ai/retrieval-qa-chat")
+
+    # crear una chain toma el contenido de los documentos y los une
+    combine_docs_chain = create_stuff_documents_chain(llm, retrieval_qa_chat_prompt)
+
+    # para obtener los documentos y hacer el paso de unir todo_el_contenido
+    retrieval_chain = create_retrieval_chain(
+        retriever=vectorstore.as_retriever(), combine_docs_chain=combine_docs_chain
+    )
+
+    result = retrieval_chain.invoke({"input": query})
+
+    print(result)
+
+    template = """Use the following pieces of context to answer the question at the end. 
+    If you don't know the answer, just say you don't know, don't try to make up an answer.
+    Use three sentences maximum and keep the answer as concise as possible.
+    Always say "thanks for asking!" at the end of the answer.
+    
+    {context}
+    
+    Question: {question}
+    
+    Helpful Answer:"""
+    custom_rag_prompt = PromptTemplate.from_template(template)
+
+    rag_chain = (
+            {"context": vectorstore.as_retriever() | format_docs, "question": RunnablePassthrough()}
+            | custom_rag_prompt
+            | llm
+    )
+
+    res = rag_chain.invoke(query)
+    print(res)
